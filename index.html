@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Live GPS Logger</title>
+  <link rel="icon" href="data:,">
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #f4f6f9;
+      margin: 20px;
+      padding: 20px;
+      color: #333;
+    }
+
+    h3 {
+      margin-top: 30px;
+      font-size: 22px;
+      color: #2c3e50;
+    }
+
+    button {
+      background-color: #3498db;
+      color: white;
+      border: none;
+      padding: 10px 16px;
+      margin: 5px 8px 15px 0;
+      border-radius: 6px;
+      font-size: 14px;
+      cursor: pointer;
+      transition: background-color 0.2s ease;
+    }
+
+    button:hover {
+      background-color: #2980b9;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background-color: white;
+      margin-top: 10px;
+      border-radius: 8px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+      overflow: hidden;
+    }
+
+    th, td {
+      padding: 14px 16px;
+      text-align: left;
+      border-bottom: 1px solid #e0e0e0;
+      font-size: 14px;
+    }
+
+    th {
+      background-color: #f7f9fc;
+      color: #34495e;
+      font-weight: bold;
+    }
+
+    tr:hover {
+      background-color: #f0f8ff;
+    }
+
+    td {
+      color: #555;
+    }
+
+    @media screen and (max-width: 768px) {
+      table, thead, tbody, th, td, tr {
+        display: block;
+      }
+
+      thead {
+        display: none;
+      }
+
+      tr {
+        margin-bottom: 15px;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        padding: 10px;
+        background: white;
+      }
+
+      td {
+        text-align: right;
+        position: relative;
+        padding-left: 50%;
+      }
+
+      td::before {
+        content: attr(data-label);
+        position: absolute;
+        left: 16px;
+        top: 14px;
+        font-weight: bold;
+        color: #333;
+        text-align: left;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <button onclick="start1()">Start</button>
+  <button onclick="stop1()">Stop</button>
+  <button onclick="deleteData()">Delete Data</button>
+  <button onclick="syncData()">Sync to MongoDB</button>
+
+  <h3>Live Location Data</h3>
+  <table border="1">
+    <thead>
+      <tr>
+        <th>Id</th>
+        <th>Latitude</th>
+        <th>Longitude</th>
+        <th>Timestamp</th>
+        <th>Device Info</th>
+        <th>Trip ID</th>
+        <th>Synced</th>
+      </tr>
+    </thead>
+    <tbody id="data-table"></tbody>
+  </table>
+
+  <script>
+    const dataTable = document.getElementById("data-table");
+    let watchId = null;
+    let db;
+    let currentTripId = null;
+    let lastPosition = null;
+    let stationaryThreshold = 1; // meters
+
+    function generateTripId() {
+      return 'trip-' + Date.now();
+    }
+
+    const request = indexedDB.open("LocationLoggerDB", 1);
+    request.onupgradeneeded = function(event) {
+      db = event.target.result;
+      if (!db.objectStoreNames.contains("LiveGPSData")) {
+        db.createObjectStore("LiveGPSData", { keyPath: "id", autoIncrement: true });
+      }
+    };
+
+    request.onsuccess = function(event) {
+      db = event.target.result;
+      console.log("Database opened successfully");
+      loadStoredLocations();
+    };
+
+    request.onerror = function(event) {
+      console.error("Error opening database:", event.target.error);
+    };
+
+    function getDistanceFromLatLonInMeters(lat1, lon1, lat2, lon2) {
+      const R = 6371000;
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+        Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return R * c;
+    }
+
+    function start1() {
+      if (!("geolocation" in navigator)) {
+        alert("Geolocation not supported by this browser.");
+        return;
+      }
+
+      currentTripId = generateTripId();
+      lastPosition = null;
+
+      watchId = navigator.geolocation.watchPosition(
+        (position) => {
+          const { latitude, longitude } = position.coords;
+          const timestamp = new Date().toLocaleString();
+          const deviceInfo = navigator.userAgent;
+
+          if (lastPosition) {
+            const distance = getDistanceFromLatLonInMeters(
+              lastPosition.latitude,
+              lastPosition.longitude,
+              latitude,
+              longitude
+            );
+            if (distance < stationaryThreshold) {
+              console.log("Stationary (< 1 m). Skipping log.");
+              return;
+            }
+          }
+
+          lastPosition = { latitude, longitude };
+          storeLocation(latitude, longitude, timestamp, deviceInfo, currentTripId);
+        },
+        (error) => {
+          console.error("Error getting location:", error.message);
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 1000,
+          maximumAge: 0
+        }
+      );
+    }
+
+    function stop1() {
+      if (watchId !== null) {
+        navigator.geolocation.clearWatch(watchId);
+        watchId = null;
+        currentTripId = null;
+        lastPosition = null;
+        console.log("GPS stopped.");
+      }
+    }
+
+    function storeLocation(latitude, longitude, timestamp, deviceInfo, tripId) {
+      if (!db) return;
+      const transaction = db.transaction(["LiveGPSData"], "readwrite");
+      const store = transaction.objectStore("LiveGPSData");
+      const location = { latitude, longitude, timestamp, deviceInfo, tripId, synced: false };
+      store.add(location);
+      transaction.oncomplete = updateDisplay;
+    }
+
+    function updateDisplay() {
+      if (!db) return;
+      dataTable.innerHTML = "";
+      const transaction = db.transaction(["LiveGPSData"], "readonly");
+      const store = transaction.objectStore("LiveGPSData");
+      const request = store.openCursor();
+
+      request.onsuccess = function(event) {
+        const cursor = event.target.result;
+        if (cursor) {
+          const value = cursor.value;
+          const row = `<tr>
+            <td data-label="Id">${value.id}</td>
+            <td data-label="Latitude">${value.latitude}</td>
+            <td data-label="Longitude">${value.longitude}</td>
+            <td data-label="Timestamp">${value.timestamp}</td>
+            <td data-label="Device Info">${value.deviceInfo}</td>
+            <td data-label="Trip ID">${value.tripId || "-"}</td>
+            <td data-label="Synced">${value.synced ? "True" : "False"}</td>
+          </tr>`;
+          dataTable.innerHTML += row;
+          cursor.continue();
+        }
+      };
+    }
+
+    function loadStoredLocations() {
+      updateDisplay();
+    }
+
+    function deleteData() {
+      if (!db) return;
+      const transaction = db.transaction(["LiveGPSData"], "readwrite");
+      const store = transaction.objectStore("LiveGPSData");
+      const request = store.clear();
+
+      request.onsuccess = function() {
+        alert("All data deleted from IndexedDB");
+        dataTable.innerHTML = "";
+      };
+
+      request.onerror = function(event) {
+        console.error("Error deleting data:", event.target.error);
+      };
+    }
+
+    function syncData() {
+      if (!db) return;
+      const transaction = db.transaction(["LiveGPSData"], "readonly");
+      const store = transaction.objectStore("LiveGPSData");
+      const request = store.getAll();
+
+      request.onsuccess = async function(event) {
+        const allData = event.target.result;
+        const unsyncedData = allData.filter(item => !item.synced);
+
+        if (unsyncedData.length === 0) {
+          alert("No unsynced data to sync.");
+          return;
+        }
+
+        try {
+          const response = await fetch("https://sensor1-b6ox.onrender.com/mongodb/post", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(unsyncedData)
+          });
+
+          if (response.ok) {
+            const updateTransaction = db.transaction(["LiveGPSData"], "readwrite");
+            const updateStore = updateTransaction.objectStore("LiveGPSData");
+
+            for (const item of unsyncedData) {
+              item.synced = true;
+              updateStore.put(item);
+            }
+
+            updateTransaction.oncomplete = () => {
+              alert("Data synced successfully.");
+              updateDisplay();
+            };
+          } else {
+            const errText = await response.text();
+            alert("Failed to sync: " + errText);
+          }
+        } catch (error) {
+          alert("Sync error: " + error.message);
+          console.error(error);
+        }
+      };
+
+      request.onerror = function(event) {
+        console.error("Read error:", event.target.error);
+      };
+    }
+  </script>
+</body>
+</html>
