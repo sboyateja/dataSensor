@@ -260,20 +260,27 @@
     }
 
     function deleteData() {
-      if (!db) return;
-      const transaction = db.transaction(["LiveGPSData"], "readwrite");
-      const store = transaction.objectStore("LiveGPSData");
-      const request = store.clear();
+  if (!db) return;
 
-      request.onsuccess = function() {
-        alert("All data deleted from IndexedDB");
-        dataTable.innerHTML = "";
-      };
+  const confirmDelete = confirm("Are you sure you want to delete all location data?");
+  if (!confirmDelete) {
+    alert("Data deletion cancelled.");
+    return;
+  }
 
-      request.onerror = function(event) {
-        console.error("Error deleting data:", event.target.error);
-      };
-    }
+  const transaction = db.transaction(["LiveGPSData"], "readwrite");
+  const store = transaction.objectStore("LiveGPSData");
+  const request = store.clear();
+
+  request.onsuccess = function() {
+    alert("All data deleted from IndexedDB");
+    dataTable.innerHTML = "";
+  };
+
+  request.onerror = function(event) {
+    console.error("Error deleting data:", event.target.error);
+  };
+}
 
     function syncData() {
       if (!db) return;
